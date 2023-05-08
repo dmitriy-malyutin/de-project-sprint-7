@@ -25,7 +25,7 @@ user = "dmitriymal"
 hdfs_path = "hdfs://rc1a-dataproc-m-dg5lgqqm7jju58f9.mdb.yandexcloud.net:8020"
 geo_path = "/user/master/data/geo/events/"
 citygeodata_csv = f"{hdfs_path}/user/{user}/data/citygeodata/"
-start = '2022-01-01'
+start = '2022-06-2dd1'
 depth = 28
 
 
