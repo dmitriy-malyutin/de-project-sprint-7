@@ -58,13 +58,10 @@ udf_get_distance = F.udf(get_distance)
 
 
 def main():
-    spark = (
-            SparkSession
-            .builder
-            .master('yarn')
-            .appName(f"{user}_calculate_GEO_by_date_{start_date}_with_depth_{depth}")
-            .getOrCreate()
-        )
+    spark = SparkSession.builder \
+        .master('yarn') \
+        .appName(f"{user}_calculate_GEO_by_date_{start_date}_with_depth_{depth}") \
+        .getOrCreate()
 
     #Сохраняем все события message с заполненными координатами
     df_all_message = (spark.read.parquet(*input_paths(start_date, depth)).filter("event_type == 'message'")
@@ -232,19 +229,14 @@ def main():
     #df_count_reg
     #df_count_reaction
     #df_count_subscription
-    df_geo_analitics_mart = (
-        df_count_message.join(df_count_reg, ['zone_id','week','month'],how = 'full')
-        .join(df_count_reaction, ['zone_id','week','month'], how='full')
+    df_geo_analitics_mart = df_count_message.join(df_count_reg, ['zone_id','week','month'],how = 'full') \
+        .join(df_count_reaction, ['zone_id','week','month'], how='full') \
         .join(df_count_subscription, ['zone_id','week','month'], how='full')
-    )
 
     #Сохранение витрины для аналитиков на hdfs 
-    (
-        df_geo_analitics_mart
-        .write
-            .mode("overwrite") 
-            .parquet(f"{hdfs_path}/user/{user}/marts/geo")
-    )
+    df_geo_analitics_mart.write \
+        .mode("overwrite") \
+        .parquet(f"{hdfs_path}/user/{user}/marts/geo")
 
 
 if __name__ == '__main__':

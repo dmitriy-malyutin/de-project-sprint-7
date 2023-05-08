@@ -54,8 +54,26 @@ def get_distance(lon_a, lat_a, lon_b, lat_b):
 
     return abs(round(distance, 2))
 
-#create a user defined function to use it on our Spark DataFrame
+# Обход отсутствия временных зон для городов. Т.к. городов не много, поясов тоже, решил обработать руками. 
+# Функция подставляет город из того же часового пояса, присутствующий в списке городов для timezone
+def time_zone(city):
+    if city in ('Sydney', 'Melbourne', 'Hobart', 'Canberra', 'Maitland', 'Cranbourne', 'Launceston', 'Newcastle', 'Bendigo', 'Wollongong', 'Geelong', 'Hobart'):
+        city_zone = 'Sydney' #'UTC+11:00'
+    elif city in ('Adelaide'):
+        city_zone = 'Adelaide' #'UTC+10:30'
+    elif city in ('Brisbane', 'Gold Coast', 'Townsville', 'Ipswich', 'Cairns', 'Toowoomba', 'Ballarat', 'Mackay', 'Rockhampton'):
+        city_zone = 'Brisbane' #'UTC+10:00'
+    elif city in ('Darwin'):
+        city_zone = 'Darwin' #'UTC+9:30'
+    elif city in ('Bunbury', 'Perth'):
+        city_zone = 'Perth' #'UTC+8:00'
+    else:
+        city_zone = 'Sydney' #'UTC+9:00'
+    return city_zone
+
+# create a user defined function to use it on our Spark DataFrame
 udf_get_distance = F.udf(get_distance)
+timezone = F.udf(time_zone)
 
 
 def main():
@@ -69,88 +87,96 @@ def main():
 
     
     #Загрузка всех сообщений
-    df_message = (
-        spark.read.parquet(*input_paths(start_date, depth)).filter("event_type == 'message'")\
+    df_message = spark.read \
+        .parquet(*input_paths(start_date, depth)) \
+        .filter("event_type == 'message'") \
         .select(F.col('event.message_from').alias('user_id')
-            ,F.date_trunc("day",F.coalesce(F.col('event.datetime'),F.col('event.message_ts'))).alias("date")
+            ,F.date_trunc("day",F.coalesce(F.col('event.datetime'),
+                                        F.col('event.message_ts'))).alias("date")
             ,'lat', 'lon')
-        )
 
-    #citygeodata_csv = f"{hdfs_path}/user/{user}/data/citygeodata/geo.csv"
     df_csv = spark.read.csv(citygeodata_csv, sep = ';', header = True)
     df_csv = df_csv.withColumn("lat",regexp_replace("lat", ",", ".")).withColumn("lng",regexp_replace("lng",",","."))
-    df_citygeodata = df_csv.select(F.col("id").cast(LongType()).alias("city_id"),(F.col("city")).alias("city_name"),(F.col("lat")).cast(DoubleType()).alias("city_lat"),(F.col("lng")).cast(DoubleType()).alias("city_lon"))
-
+    df_citygeodata = df_csv. \
+        select(F.col("id").cast(LongType()).alias("city_id"),
+            (F.col("city")).alias("city_name"),
+            (F.col("lat")).cast(DoubleType()).alias("city_lat"),
+            (F.col("lng")).cast(DoubleType()).alias("city_lon"))
 
     #Получение DF события перемноженные на список городов - для дальнейшего вычисления растояния до города
     df_message_and_citygeodata = (df_message.crossJoin(
         df_citygeodata.hint("broadcast")
     ))
 
-    df_message_and_distance = (df_message_and_citygeodata.select(
-        "user_id","date","city_name"
-        ,udf_get_distance(
-        F.col("lon"), F.col("lat"), F.col("city_lon"), F.col("city_lat")
-        ).cast(DoubleType()).alias("distance")).withColumn("row",F.row_number().over(
-        Window.partitionBy("user_id","date").orderBy(F.col("distance"))
-        )).filter(F.col("row") ==1).
-        drop("row", "distance"))
+    df_message_and_distance = df_message_and_citygeodata \
+        .select(
+            "user_id","date","city_name"
+            ,udf_get_distance(
+                F.col("lon"), F.col("lat"), F.col("city_lon"), F.col("city_lat")
+            ).cast(DoubleType()).alias("distance")) \
+            .withColumn("row",F.row_number().over(
+                Window.partitionBy("user_id","date") \
+                .orderBy(F.col("distance"))
+                )) \
+        .filter(F.col("row") ==1) \
+        .drop("row", "distance")
 
     #расчет показателя act_city по пользователям
-    df_act_city = (df_message_and_distance.withColumn("row",F.row_number().over(
-            Window.partitionBy("user_id").orderBy(F.col("date").desc())
-            ))
-        .filter(F.col("row") == 1)
-        .drop("row", "distance")
-        .withColumnRenamed("city_name", "act_city"))
+    df_act_city = df_message_and_distance \
+        .withColumn("row",F.row_number().over(
+                    Window.partitionBy("user_id").orderBy(F.col("date").desc())
+                )) \
+        .filter(F.col("row") == 1) \
+        .drop("row", "distance") \
+        .withColumnRenamed("city_name", "act_city")
 
     #Промежуточный DF дли построение последующих 3 DF
-    df_change = (df_message_and_distance.withColumn('max_date',F.max('date')
-        .over(Window().partitionBy('user_id')))
-        .withColumn('city_name_lag_1_desc',F.lag('city_name',-1,'start')
-        .over(Window().partitionBy('user_id').orderBy(F.col('date').desc())))
-        .filter(F.col('city_name') != F.col('city_name_lag_1_desc')))
+    df_change = df_message_and_distance \
+        .withColumn('max_date',F.max('date')
+            .over(Window().partitionBy('user_id'))) \
+        .withColumn('city_name_lag_1_desc',F.lag('city_name',-1,'start') \
+            .over(Window().partitionBy('user_id').orderBy(F.col('date').desc()))) \
+        .filter(F.col('city_name') != F.col('city_name_lag_1_desc'))
 
     #расчет домашнего города по условию что сотрудник находился в этом городе 27 дней или более
-    df_home_city = (df_change.withColumn('date_lag',F.coalesce(F.lag('date')
-        .over(Window().partitionBy('user_id').orderBy(F.col('date').desc())),F.col('max_date')))
-        .withColumn('date_diff',F.datediff(F.col('date_lag'),F.col('date')))
-        .filter(F.col('date_diff') > 27)
-        .withColumn('row',F.row_number()
-        .over(Window.partitionBy("user_id").orderBy(F.col("date").desc())))
-        .filter(F.col('row') == 1)
-        .drop('date','city_name_lag_1_desc','date_lag','row','date_diff','max_date'))
+    df_home_city = df_change \
+        .withColumn('date_lag',F.coalesce(F.lag('date')
+            .over(Window().partitionBy('user_id').orderBy(F.col('date').desc())),F.col('max_date'))) \
+        .withColumn('date_diff',F.datediff(F.col('date_lag'),F.col('date'))) \
+        .filter(F.col('date_diff') > 27) \
+        .withColumn('row',F.row_number() \
+            .over(Window.partitionBy("user_id").orderBy(F.col("date").desc()))) \
+        .filter(F.col('row') == 1) \
+        .drop('date','city_name_lag_1_desc','date_lag','row','date_diff','max_date')
 
     #считаем количество посещённых городов. Если пользователь побывал в каком-то городе повторно, то это считается за отдельное посещение.
-    df_travel_count = (df_change.groupBy("user_id").count().withColumnRenamed("count", "travel_count"))
+    df_travel_count = df_change.groupBy("user_id") \
+        .count() \
+        .withColumnRenamed("count", "travel_count")
 
     #формируем список городов в порядке посещения.
-    df_travel_array = (df_change
-        .groupBy("user_id")
-        .agg(F.collect_list('city_name').alias('travel_array')))
+    df_travel_array = df_change \
+        .groupBy("user_id") \
+        .agg(F.collect_list('city_name').alias('travel_array'))
 
     #расчет метики local_time - формула расчета описана в документации
-    df_local_time = (
-        df_act_city
-        .withColumn("timezone", F.concat(F.lit("Australia/"), F.col('act_city')) )
-        .withColumn("local_time", F.from_utc_timestamp(F.col("date"),F.col('timezone')))
-        .drop("timezone", "date", "act_city"))
+    df_local_time = df_act_city \
+        .withColumn('utc', timezone(F.col('act_city'))) \
+        .withColumn("timezone", F.concat(F.lit("Australia/"), F.col('utc'))) \
+        .withColumn("local_time", F.from_utc_timestamp(F.col("date"),F.col('timezone'))) \
+        .drop("timezone", "date", "act_city", "utc")
 
     #объединения всех метрик в одину ветрину
-    df_user_analitics_mart = (df_act_city.select("user_id", "act_city")
-        .join(df_home_city, 'user_id', how='left')
-        .join(df_travel_count, 'user_id', how='left')
-        .join(df_travel_array, 'user_id', how='left')
-        .join(df_local_time, 'user_id', how='left'))
+    df_user_analitics_mart = df_act_city.select("user_id", "act_city") \
+        .join(df_home_city, 'user_id', how='left') \
+        .join(df_travel_count, 'user_id', how='left') \
+        .join(df_travel_array, 'user_id', how='left') \
+        .join(df_local_time, 'user_id', how='left')
 
     #Сохранение витрины для аналитиков на hdfs 
-    (
-        df_user_analitics_mart
-        .write
-            .mode("overwrite") 
-            .parquet(f"{hdfs_path}/user/{user}/marts/users")
-    )
-
+    df_user_analitics_mart.write \
+        .mode("overwrite") \
+        .parquet(f"{hdfs_path}/user/{user}/marts/users")
 
 
 if __name__ == '__main__':

@@ -23,22 +23,15 @@ def main():
     user = sys.argv[1] 
     hdfs_path = sys.argv[2] 
     geo_path = sys.argv[3]  
-    citygeodata_csv = f"{hdfs_path}/user/{user}/data/citygeodata/"
 
-    spark = (
-                SparkSession
-                .builder
-                .master('yarn')
-                .appName(f"{user}_load")
-                .getOrCreate()
-            )
+    spark = SparkSession.builder \
+        .master('yarn') \
+        .appName(f"{user}_load") \
+        .getOrCreate()
 
-
-   
-
-    events = spark.read\
-                .option("basePath", f"{hdfs_path}{geo_path}")\
-                .parquet(f"{hdfs_path}{geo_path}")\
+    events = spark.read \
+                .option("basePath", f"{hdfs_path}{geo_path}") \
+                .parquet(f"{hdfs_path}{geo_path}")
 
         
     events.write \
