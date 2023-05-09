@@ -86,9 +86,9 @@ def main():
         .where((F.col('event.subscription_channel') \
                 .isNotNull() & F.col('event.user') \
                 .isNotNull())) \
-        .select(F.col('event.subscription_channel') \
-                .alias('channel_id'),F.col('event.user') \
-                .alias('user_id')) \
+        .select(F.col('event.subscription_channel').alias('channel_id'),
+                F.col('event.user').alias('user_id'),
+                F.col('event.message_ts').alias('_ts')) \
         .distinct()
 
 
@@ -106,18 +106,22 @@ def main():
     #df_user_message_from_to - левая стора общения
     #объединяем df_user_message_from_to и df_user_message_to_from = df_user_communications
     df_user_messages_from_to = spark.read \
-        .parquet(*input_paths(start_date, depth)) \
-        .filter("event_type == 'message'") \
-        .where((F.col('event.message_from').isNotNull()&F.col('event.message_to').isNotNull())) \
-        .select(F.col('event.message_from').alias('user_left'),F.col('event.message_to').alias('user_right')) \
-        .distinct()
+            .parquet(*input_paths(start_date, depth)) \
+            .filter("event_type == 'message'") \
+            .where((F.col('event.message_from').isNotNull()&F.col('event.message_to').isNotNull())) \
+            .select(F.col('event.message_from').alias('user_left'),
+                    F.col('event.message_to').alias('user_right'),
+                    F.col('event.message_ts').alias('_ts')) \
+            .distinct()
 
     df_user_messages_to_from = spark.read \
-        .parquet(*input_paths(start_date, depth)) \
-        .filter("event_type == 'message'") \
-        .where((F.col('event.message_from').isNotNull()&F.col('event.message_to').isNotNull())) \
-        .select(F.col('event.message_to').alias('user_left'),F.col('event.message_from').alias('user_right')) \
-        .distinct()
+            .parquet(*input_paths(start_date, depth)) \
+            .filter("event_type == 'message'") \
+            .where((F.col('event.message_from').isNotNull()&F.col('event.message_to').isNotNull())) \
+            .select(F.col('event.message_to').alias('user_left'),
+                    F.col('event.message_from').alias('user_right'),
+                    F.col('event.message_ts').alias('_ts'))\
+            .distinct()
 
     #делаю добавление левых к правым и правых к левым потому что не известно какая комбинация встретится в df_subscriptions
     #filter(F.col("user_left") != F.col("user_right") ) - удаляем пользователей где левый равен правому
@@ -141,23 +145,39 @@ def main():
 
     #Получаем все подписки и удаляем дубликаты
     df_events_messages = spark.read \
-        .parquet(*input_paths(start_date, depth)) \
-        .filter("event_type == 'message'") \
-        .where( F.col("lat").isNotNull() | (F.col("lon").isNotNull())) \
-        .select(F.col('event.message_from') \
-        .alias('user_id'),F.col("lat").alias('lat'),F.col("lon").alias('lon')) \
-        .distinct()
+            .parquet(*input_paths(start_date, depth)) \
+            .filter("event_type == 'message'") \
+            .where( F.col("lat").isNotNull() | (F.col("lon").isNotNull())) \
+            .select(F.col('event.message_from').alias('user_id'),
+                    F.col("lat").alias('lat'),
+                    F.col("lon").alias('lon'),
+                    F.col('event.message_ts').alias('_ts')) \
+            .distinct()
 
 
     #Получение подписок и координат с округлением до двух знаков в дробной части
     df_events_subscription = spark.read \
-        .parquet(*input_paths(start_date, depth)) \
-        .filter("event_type == 'subscription'") \
-        .where( F.col("lat").isNotNull() | (F.col("lon").isNotNull())) \
-        .select(F.col("event.user") \
-        .alias('user_id'),F.col("lat").alias('lat'),F.col("lon").alias('lon')) \
-        .distinct()
+            .parquet(*input_paths(start_date, depth)) \
+            .filter("event_type == 'subscription'") \
+            .where( F.col("lat").isNotNull() | (F.col("lon").isNotNull())) \
+            .select(F.col("event.user").alias('user_id'),
+                    F.col("lat").alias('lat'),
+                    F.col("lon").alias('lon'),
+                    F.col('event.message_ts').alias('_ts')) \
+            .distinct()
+    
+    # Получим последние события:
+    windowSpec  = Window.partitionBy("user_id").orderBy(F.col('_ts').desc())
 
+    df_events_messages = df_events_messages \
+        .withColumn("row_number",F.row_number().over(windowSpec)) \
+        .filter("row_number == 1")
+    
+    df_events_subscription = df_events_subscription \
+        .withColumn("row_number",F.row_number().over(windowSpec)) \
+        .filter("row_number == 1")
+    
+    
     #объединение координат сообщений и подписок
     df_events_coordinats = df_events_subscription \
         .union(df_events_messages) \
